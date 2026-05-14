@@ -705,7 +705,7 @@ class Expr:
     return HistoryExpr(
       source=self,
       action=action,
-      vaild_when=HistoryGuard(condition)
+      valid_when=HistoryGuard(condition)
     )
   def _runtime_list(self, g, is_greater = None, is_chaizhao = None, info = None):
     raise TypeError(f"{type(self).__name__} does not expose a runtime list")
@@ -814,7 +814,7 @@ class HistoryGuard:
 class HistoryExpr(Expr):
   source: Expr = None
   action: HistoryAction = None
-  vaild_when: HistoryGuard = field(default_factory=HistoryGuard)
+  valid_when: HistoryGuard = field(default_factory=HistoryGuard)
   memory: list = field(default_factory=list)
   def _runtime_list(self, g, is_greater = None, is_chaizhao = None, info = None):
     return self.memory
@@ -823,7 +823,7 @@ class HistoryExpr(Expr):
   def is_pure(self):
     return False
   def on_tick(self, g : game, is_greater, is_chaizhao, info):
-    if not self.vaild_when.check(g, is_greater, is_chaizhao, info):
+    if not self.valid_when.check(g, is_greater, is_chaizhao, info):
       return
     val = self.source.eval(g, is_greater, is_chaizhao, info)
     if val is None: return
@@ -1641,7 +1641,7 @@ class r_skill(base_skill):
   before_check: list[CounterAction] = field(default_factory=list)
   on_trigger: list[CounterAction] = field(default_factory=list)
   on_work_after: list[CounterAction] = field(default_factory=list)
-  vaild_when : Expr | bool = field(default_factory=NotChaizhao)
+  valid_when : Expr | bool = field(default_factory=NotChaizhao)
   def _exprify_fields(self, *args):
     """将参数 Expr 化"""
     for name in args:
@@ -1650,18 +1650,18 @@ class r_skill(base_skill):
         try: setattr(self, name, _to_expr(val))
         except TypeError: pass
   def __post_init__(self):
-    self._exprify_fields("vaild_when")
+    self._exprify_fields("valid_when")
   def _str_main(self):
     raise NotImplementedError
   def __str__(self):
-    if self.vaild_when is None: return self._str_main()
-    else: return f"当 {self.vaild_when} 时，{self._str_main()}"
+    if self.valid_when is None: return self._str_main()
+    else: return f"当 {self.valid_when} 时，{self._str_main()}"
   def work(self, g:game, is_greater:bool, is_chaizhao:bool):
     raise KeyError(f"Subclass must imply work()")
   def __call__(self, g, is_greater, is_chaizhao):
     for action in self.before_check:
       action.apply(g, is_greater, is_chaizhao, self.info)
-    checker = self.vaild_when
+    checker = self.valid_when
     ok = False
     if checker is None: ok = True
     elif isinstance(checker, bool) and checker == True: ok = True
@@ -1685,10 +1685,10 @@ class r_skill(base_skill):
            is_greater : bool = None,
            is_chaizhao : bool = None,
            info : Any = None):
-    if isinstance(self.vaild_when, bool):
-      return self.vaild_when
+    if isinstance(self.valid_when, bool):
+      return self.valid_when
     else:
-      return self.vaild_when.eval(g, is_greater, is_chaizhao, info)
+      return self.valid_when.eval(g, is_greater, is_chaizhao, info)
 @dataclass(repr=False)
 class rcall_plus(r_skill):
   num : int | Expr = None
