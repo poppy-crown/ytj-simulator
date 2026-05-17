@@ -277,6 +277,17 @@ class game:
     self.dice_this_turn = None # 当前回合骰子的值
     self.game_counter = Counter()
     self.eternal_skill_plus = Counter()
+    self.init_skills()
+  def init_skills(self):
+    self.skill_type_now = None
+    for skill in self.greater_player.skills:
+      for s in self.iter_skills(skill):
+        if isinstance(s, r_skill):
+          s.init_skill(self, GREATER)
+    for skill in self.less_player.skills:
+      for s in self.iter_skills(skill):
+        if isinstance(s, r_skill):
+          s.init_skill(self, LESS)
   def get_chaizhao_add(self):
     self.chaizhao_add = self.greater_player.num - self.less_player.num
     self.skill_type_now = ST_CHAIZHAO
@@ -481,6 +492,13 @@ class game:
       return None
     if self.chaizhao_history is None: return "n"
     if self.chaizhao_history[-1] == "通过": return "c"
+  def iter_skills(self, skill):
+    """动态展开，后续会出现 GROUP 嵌套。"""
+    if skill.type == ST_GROUP:
+      for subskill in skill.sub_skills:
+        yield from self.iter_skills(subskill)
+    else:
+      yield skill
   def __str__(self):
     return f"\
 Game info:\nGreater player: {self.greater_player}\
@@ -1055,7 +1073,7 @@ class GameEternalAddValue(ReversableExpr, DynamicExpr):
     return "当前局势"
 @dataclass(slots=True, frozen=False, repr=False)
 class LastValue(DynamicExpr):
-  """默认的结果，在 0~9 中"""
+  """默认的结果，在 1~10 中"""
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
     return g.last_value
   def __str__(self):
@@ -1683,6 +1701,7 @@ class IsChaizhao(Expr):
 @dataclass(repr=False)
 class r_skill(base_skill):
   skill_name: str | None = None
+  on_init: list[CounterAction] = field(default_factory=list)
   before_check: list[CounterAction] = field(default_factory=list)
   on_trigger: list[CounterAction] = field(default_factory=list)
   on_work_after: list[CounterAction] = field(default_factory=list)
@@ -1696,6 +1715,9 @@ class r_skill(base_skill):
         except TypeError: pass
   def __post_init__(self):
     self._exprify_fields("valid_when")
+  def init_skill(self, g, is_greater: bool):
+    for action in self.on_init:
+      action.apply(g, is_greater, False, self.info)
   def _str_main(self):
     raise NotImplementedError
   def __str__(self):
@@ -1936,6 +1958,62 @@ class rcall_eternal_plus(r_skill):
       g.eternal_skill_plus[self.skill_name] += delta
   def _str_main(self):
     return f"永久获得 {self.num:+d}" if isinstance(self.num, int) else f"永久获得 {self.num}"
+@dataclass(repr=False, kw_only=True)
+class rcall_armor(rcall_last_range_change):
+  """
+  护甲机制，本质是 rcall_last_range_change 的子类。
+  消耗一层护甲抵消一次失败（变为均势），如果负数，每 -1 额外消耗一层。
+  armor_name 是名字，不能重叠，但是自动增加 \"armor:\" 前缀。
+  value 是初始护甲层数。
+  armor_effect 是起效后的转化的类型（唯一的用处是提供缺省值），不应该再使用 self.arg。
+  """
+  armor_name: str = None
+  value: int | Expr = 1
+  armor_effect: int | BattleRange | Expr = DRAW
+  def __post_init__(self):
+    if self.armor_name is None:
+      raise ValueError("rcall_armor requires armor_name")
+    # 保留额外传入的 init / after hook
+    user_on_init = list(self.on_init)
+    user_on_work_after = list(self.on_work_after)
+    # 保留额外传入的 valid_when
+    user_valid_when = self.valid_when
+    armor = CounterValue(
+      name=f"armor:{self.armor_name}",
+      turn_type=TurnType.FIGHT
+    )
+    cost = (LastValue() > 0).ifelse(
+      1, 2 - LastValue()
+    )
+    armor_valid_when = (
+      LastRange().isin(LOSS) & (armor >= cost)
+    )
+    if user_valid_when is None:
+      self.valid_when = armor_valid_when
+    elif user_valid_when is True:
+      self.valid_when = armor_valid_when
+    elif user_valid_when is False:
+      self.valid_when = False
+    else:
+      self.valid_when = _to_expr(user_valid_when) & armor_valid_when
+    self.arg = self.armor_effect
+    self.on_init = [
+      CounterSet(
+        name=f"armor:{self.armor_name}",
+        value=self.value,
+        turn_type=TurnType.FIGHT
+      )
+    ] + user_on_init
+    self.on_work_after = [
+      CounterAdd(
+        name=f"armor:{self.armor_name}",
+        value=-cost,
+        turn_type=TurnType.FIGHT
+      )
+    ] + user_on_work_after
+    super().__post_init__()
+  def _str_main(self):
+    return f"(护甲[{self.armor_name}]，初始值 {self.value}，效果 [变为 {self.armor_effect}])"
 
 def simulate(g: game, N: int = 100000, display:bool = True) -> float:
   start_time = time.time()

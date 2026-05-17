@@ -35,17 +35,20 @@ from skill import rcall_last_range_change, rcall_range_change, rcall_temp_range_
 # 修改本轮结果，永久修改区间，仅在本轮修改区间
 from skill import rcall_num_view_as
 # 值视为，这个 API 已经不再维护，因为新的 plus 可以覆盖其功能
+from skill import rcall_armor
+# 护甲机制
 
 if __name__ == "__main__":
   p1 = player([
               rcall_eternal_plus(
                 skill_name="aa",
-                valid_when=EternalSkillPlusAt(skill_name="aa")<2,
+                valid_when=EternalSkillPlusAt(skill_name="aa")<5,
                 num=1
-              )
+              ),
+              rcall_armor(armor_name="xyz", value=1)
             ])
   p2 = player([
-              rcall_plus(num=2),
+              rcall_plus(num=3),
             ])
   g = game(p1, p2, base_dice(),
            {"advantage":"advantage", "disadvantage":"disadvantage"}
