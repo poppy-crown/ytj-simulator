@@ -263,7 +263,7 @@ class game:
     self.dice_result_history = []
     self.state_history = [BEGIN] # 新加入一个哨兵节点
     self.add = 0
-    self.eternal_add = 0
+    self.situation_add = 0
     self.turn = 0  # number of the turn
     self.dice = dice  # how to get the dice
     self.last_value = 0  # final value of last turn
@@ -276,6 +276,7 @@ class game:
     self.skill_type_now = ST_ADD # for a pause
     self.dice_this_turn = None # 当前回合骰子的值
     self.game_counter = Counter()
+    self.eternal_skill_plus = Counter()
   def get_chaizhao_add(self):
     self.chaizhao_add = self.greater_player.num - self.less_player.num
     self.skill_type_now = ST_CHAIZHAO
@@ -355,7 +356,10 @@ class game:
     self.get_add_value(is_chaizhao)
     self.last_value = dice + self.add
     if not is_chaizhao:
-      self.last_value += self.eternal_add
+      self.last_value += self.situation_add
+      # 局面加值
+      self.last_value += sum(self.eternal_skill_plus.values())
+      # 技能的永久加值
     else:
       self.last_value += self.get_chaizhao_add()
     self.skill_type_now = ST_MODIFY_NUM
@@ -409,11 +413,11 @@ class game:
     if self.last_state == WIN:
       return (WIN, self.turn)
     elif self.last_state == ADVANTAGE:
-      self.eternal_add += 1
+      self.situation_add += 1
     elif self.last_state == DRAW:
       pass
     elif self.last_state == DISADVANTAGE:
-      self.eternal_add -= 1
+      self.situation_add -= 1
     elif self.last_state == LOSS:
       return (LOSS, self.turn)
     return (self.last_state, self.turn)
@@ -468,7 +472,8 @@ class game:
     if is_chaizhao:
       self.last_value += self.chaizhao_add
     else:
-      self.last_value += self.eternal_add
+      self.last_value += self.situation_add
+      self.last_value += sum(self.eternal_skill_plus.values())
     self.get_state(calc_value=False)
   def win_type(self):
     """n-直接获胜，c-拆招获胜"""
@@ -872,6 +877,8 @@ class StayTail(SeqPolicy):
            info : Any = None
            ) -> int | None:
     return min(idx + 1, n - 1)
+  def __str__(self):
+    return "停留在尾部"
 class Bounce(SeqPolicy):
   def __init__(self):
     self.dir = 1
@@ -983,7 +990,7 @@ class Const(Receiver):
     return f"{self.value}"
 @dataclass(slots=True, frozen=False, repr=False)
 class Tail(ReversableReceiver, DynamicExpr):
-  """x 反转为 11 - x"""
+  """x 反转为 11 - x，值域 [1,10]"""
   tail_id : int = 0
   def _compute(self,
            g : game,
@@ -1008,14 +1015,17 @@ class LastDirectSum(Receiver):
     return "直和"
 @dataclass(slots=True, frozen=False, repr=False)
 class Turn(DynamicExpr):
-  """回合数，从 0 开始有效"""
+  """
+  回合数，从 0 开始有效。
+  如果用 last_range_change，从 1 开始有效。
+  """
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
     return g.turn
   def __str__(self):
     return "回合数"
 @dataclass(slots=True, frozen=False, repr=False)
 class LastDiceResult(ReversableReceiver, DynamicExpr):
-  """自然定义，对小方取反"""
+  """自然定义，对小方取反。值域 [1,10]"""
   is_reverse : bool = True
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
     if self.is_reverse:
@@ -1038,9 +1048,9 @@ class GameAddValue(ReversableExpr, DynamicExpr):
 class GameEternalAddValue(ReversableExpr, DynamicExpr):
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
     if self.is_reverse:
-      return g.eternal_add if is_greater else -g.eternal_add
+      return g.situation_add if is_greater else -g.situation_add
     else:
-      return g.eternal_add
+      return g.situation_add
   def _str_main(self):
     return "当前局势"
 @dataclass(slots=True, frozen=False, repr=False)
@@ -1184,53 +1194,88 @@ class GameDiceResultHistory(ReversableExpr, DynamicExpr):
 @dataclass(slots=True, frozen=False, repr=False)
 class FindRange(ReversableExpr, DynamicExpr):
   """找到指定类型的 range, find_order = 0 从小到大，= 1 逆序，会反转"""
-  find_range : BattleRange | Expr | None = None
-  find_order : int = 0
+  find_range : BattleRange | list[Expr] | Expr | None = None
+  find_order : int | list[Expr] = 0
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
     r = self.find_range
     if isinstance(r, Expr):
       r = r.eval(g, is_greater, is_chaizhao, info)
+    if isinstance(r, list):
+      t = [s.eval(g, is_greater, is_chaizhao, info) if isinstance(s, Expr) else s for s in r]
+      r = t
     if r is None: return None # 有可能 eval 出来是 None
     o = self.find_order
-    if self.is_reverse and not is_greater:
-      r = range_reverse(r)
+    if self.is_reverse and not is_greater and isinstance(o, int):
+      if isinstance(r, list):
+        r = [range_reverse(x) for x in r]
+      else:
+        r = range_reverse(r)
       o = 1 - o # 反转
-    if o == 0:
-      for i in range(0, len(g.state_lst)):
-        if g.state_lst[i] == r:
-          return i
-    else:
-      for i in reversed(range(0, len(g.state_lst))):
-        if g.state_lst[i] == r:
-          return i
+    if o == 0: flst = range(0, len(g.state_lst))
+    elif o == 1: flst = reversed(range(0, len(g.state_lst)))
+    elif isinstance(o, list):
+      flst = [i.eval(g, is_greater, is_chaizhao, info) if isinstance(i, Expr) else i for i in o]
+    for i in flst:
+      if isinstance(r, list) and g.state_lst[i] in r:
+        return i
+      elif g.state_lst[i] == r:
+        return i
   def _str_main(self):
     s = "从小到大" if self.find_order == 0 else "从大到小"
     return f"(按 {s} 的顺序在 state_list 找到第一个 {self.find_order})"
 @dataclass(slots=True, frozen=False, repr=False)
 class FindTempRange(ReversableExpr, DynamicExpr):
   """找到指定类型的 range, find_order = 0 从小到大，= 1 逆序，会反转"""
-  find_range : BattleRange | Expr | None = None
-  find_order : int = 0
+  find_range : BattleRange | list[Expr] | Expr | None = None
+  find_order : int | list[Expr] = 0
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
     r = self.find_range
     if isinstance(r, Expr):
       r = r.eval(g, is_greater, is_chaizhao, info)
+    if isinstance(r, list):
+      t = [s.eval(g, is_greater, is_chaizhao, info) if isinstance(s, Expr) else s for s in r]
+      r = t
     if r is None: return None # 有可能 eval 出来是 None
     o = self.find_order
-    if self.is_reverse and not is_greater:
-      r = range_reverse(r)
+    if self.is_reverse and not is_greater and isinstance(o, int):
+      if isinstance(r, list):
+        r = [range_reverse(x) for x in r]
+      else:
+        r = range_reverse(r)
       o = 1 - o # 反转
-    if o == 0:
-      for i in range(0, len(g.tmp_state_lst)):
-        if g.tmp_state_lst[i] == r:
-          return i
-    else:
-      for i in reversed(range(0, len(g.tmp_state_lst))):
-        if g.tmp_state_lst[i] == r:
-          return i
+    if o == 0: flst = range(0, len(g.tmp_state_lst))
+    elif o == 1: flst = reversed(range(0, len(g.tmp_state_lst)))
+    elif isinstance(o, list):
+      flst = [i.eval(g, is_greater, is_chaizhao, info) if isinstance(i, Expr) else i for i in o]
+    for i in flst:
+      if isinstance(r, list) and g.tmp_state_lst[i] in r:
+        return i
+      elif g.tmp_state_lst[i] == r:
+        return i
   def _str_main(self):
     s = "从小到大" if self.find_order == 0 else "从大到小"
     return f"(按 {s} 的顺序在 tmp_state_list 找到第一个 {self.find_order})"
+@dataclass(slots=True, frozen=False, repr=False)
+class GameEternalSkillPlus(ReversableExpr, DynamicExpr):
+  """不需要区别正负，会自动取反。"""
+  def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
+    val = sum(g.eternal_skill_plus.values())
+    if self.is_reverse:
+      return val if is_greater else -val
+    return val
+  def _str_main(self):
+    return "永久技能加值"
+@dataclass(slots=True, frozen=False, repr=False)
+class EternalSkillPlusAt(ReversableExpr, DynamicExpr):
+  """某个技能带来的永久加值"""
+  skill_name: str = None
+  def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
+    if self.skill_name is None: return 0
+    val = g.eternal_skill_plus[self.skill_name]
+    if self.is_reverse: return val if is_greater else -val
+    else:               return val
+  def _str_main(self):
+    return f"[永久技能加值: {self.skill_name}]"
 
 # ===========================================================
 # Counter
@@ -1881,11 +1926,14 @@ class rcall_eternal_plus(r_skill):
     num = self.num
     if isinstance(num, Expr):
       num = num.eval(g, is_greater, is_chaizhao, self.info)
-    if num is None:
-      return
+    if num is None: return
     if not isinstance(num, int):
       raise TypeError(f"Num of {type(self).__name__} is not int but {num}")
-    g.eternal_add += num if is_greater else -num
+    delta = num if is_greater else -num
+    if self.skill_name is None:
+      g.situation_add += delta
+    else:
+      g.eternal_skill_plus[self.skill_name] += delta
   def _str_main(self):
     return f"永久获得 {self.num:+d}" if isinstance(self.num, int) else f"永久获得 {self.num}"
 
