@@ -1619,6 +1619,7 @@ class And(BoolBinary):
   def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
     a = self.x.eval(g, is_greater, is_chaizhao, info)
     if a is False: return False
+    if a is None: return None
     b = self.y.eval(g, is_greater, is_chaizhao, info)
     if a is None or b is None: return None
     return a and b
@@ -1629,6 +1630,7 @@ class Or(BoolBinary):
   def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
     a = self.x.eval(g, is_greater, is_chaizhao, info)
     if a is True: return True
+    if a is None: return None
     b = self.y.eval(g, is_greater, is_chaizhao, info)
     if a is None or b is None: return None
     return a or b
@@ -1697,6 +1699,55 @@ class IsChaizhao(Expr):
     return is_chaizhao
   def __str__(self):
     return "拆招"
+@dataclass(slots=True, frozen=False, repr=False)
+class CastChaizhao(ReversableExpr, DynamicExpr):
+  """
+  由当前技能所属方发起一次拆招。
+  num: 额外拆招加值
+  difficulty: 拆招难度，为 None 则返回拆招值
+  record: 是否记录到 g.chaizhao_history
+  """
+  num: int | Expr = 0
+  difficulty: int | Expr | None = 5
+  record: bool = True
+  def _eval_num(self, x, g, is_greater, is_chaizhao, info):
+    if isinstance(x, Expr):
+      return x.eval(g, is_greater, is_chaizhao, info)
+    return x
+  def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
+    if is_greater is None:
+      raise ValueError("CastChaizhao requires is_greater")
+    extra = self._eval_num(self.num, g, is_greater, is_chaizhao, info)
+    if self.difficulty is not None:
+      difficulty = self._eval_num(self.difficulty, g, is_greater, is_chaizhao, info)
+    else: difficulty = None
+    if extra is None: return False
+    if not isinstance(extra, int): raise TypeError(f"extra in {self} must be int")
+    if not isinstance(difficulty, int): raise TypeError(f"difficulty in {self} must be int")
+    old_chaizhao_add = g.chaizhao_add
+    old_skill_type = g.skill_type_now
+    # 记录旧值，避免污染外部状态，可以回退到正常状态
+    try:
+      g.get_value(True) # 内部触发其他技能
+      # 默认的 chaizhao 总是从 GREATER 视角的
+      if is_greater: g.last_value += extra
+      else:          g.last_value -= extra
+      if len(g.value_history) > 0: g.value_history[-1] = g.last_value
+      # 覆盖 get_value(True) 刚 append 的最后一个值。
+      if difficulty is None:
+        x = g.last_value
+        x = x if (not self.is_reverse or is_greater) else 11 - x
+        return x
+      greater_pass = g.last_value > difficulty
+      self_win = greater_pass if is_greater else not greater_pass
+      if self.record:
+        g.chaizhao_history.append("通过" if greater_pass else "不通过")
+      return self_win
+    finally:
+      g.chaizhao_add = old_chaizhao_add
+      g.skill_type_now = old_skill_type
+  def __str__(self):
+    return f"(发起一次拆招，额外加值 {self.num}，难度 {self.difficulty})"
 
 @dataclass(repr=False)
 class r_skill(base_skill):
@@ -1939,6 +1990,9 @@ class rcall_temp_range_change(rbase_range_change):
     return f"将 {self.range_id} 对应区间临时"
 @dataclass(repr=False, kw_only=True)
 class rcall_eternal_plus(r_skill):
+  """
+  如果 skill_name 是 None，就会加到局势上(g.situation_add)，否则在 g 上有自己的 pool
+  """
   num: int | Expr = None
   def __post_init__(self):
     super().__post_init__()

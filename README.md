@@ -962,6 +962,18 @@ This makes the dice result count as `10`.
 
 Note: this API is less recommended now, because many similar effects can be expressed with `rcall_plus` or range modification skills.
 
+## `rcall_armor`
+
+A special mechanism called "armor". To turn LOSS into DRAW spending armor, one need 1 armor for a 1 LOSS, 2 armor for a 0 LOSS, 3 armor for a -1 LOSS and so on.
+
+Example:
+
+```python
+rcall_armor(armor_name="abc", value=2, armor_effect=DRAW)
+```
+
+It create a skill name that is "armor:abc" with 2 armor. It will turn LOSS into DRAW if allowed.
+
 ---
 
 # Complete Examples

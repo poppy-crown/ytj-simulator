@@ -4,7 +4,7 @@ from skill import game, player, base_dice, simulate_game_auto_batch, simulate
 # 游戏，玩家，均匀骰子，模拟主函数
 from skill import BEGIN, LOSS, DISADVANTAGE, DRAW, ADVANTAGE, WIN
 # 开局(这是一个特殊状态，正常来说只有“第一回合的上一回合”是这个状态)，战败，下风，均势，上风，战胜
-from skill import IsChaizhao, NotChaizhao
+from skill import IsChaizhao, NotChaizhao, CastChaizhao
 # 是否是拆招
 from skill import SeqExpr, Bounce, StayTail, Once, OnceAsTurn, Loop
 
@@ -40,19 +40,19 @@ from skill import rcall_armor
 
 if __name__ == "__main__":
   p1 = player([
-              rcall_eternal_plus(
-                skill_name="aa",
-                valid_when=EternalSkillPlusAt(skill_name="aa")<5,
-                num=1
+              rcall_plus(
+                valid_when=(LastDiceResult() % 2).eq(1),
+                num=4 - (LastDiceResult() // 2)
               ),
-              rcall_armor(armor_name="xyz", value=1)
             ])
   p2 = player([
-              rcall_plus(num=3),
+              rcall_plus(num=1),
             ])
-  g = game(p1, p2, base_dice(),
-           {"advantage":"advantage", "disadvantage":"disadvantage"}
-           )
+  g = game(
+    p1, p2,
+    base_dice(),
+    {"advantage":"advantage", "disadvantage":"disadvantage"}
+  )
   simulate_game_auto_batch(
     generator=g,
     confidence_level=0.99,
