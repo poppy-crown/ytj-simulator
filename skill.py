@@ -633,6 +633,7 @@ def _to_expr(x):
     return SeqExpr(items=x)
   raise TypeError(f"Cannot convert {type(x)} to Receiver")
 def _flatten(x, g, is_greater, is_chaizhao, info):
+  """递归地将 list 中所有元素 eval"""
   if isinstance(x, Expr):
     x = x.eval(g, is_greater, is_chaizhao, info)
   if isinstance(x, (list, tuple, set)):
@@ -734,12 +735,54 @@ class Expr:
     raise TypeError(f"{type(self).__name__} does not expose a runtime list")
   def len(self):
     return ExprListLen(self)
-  def count(self, val = None):
-    return ExprListCount(self, val)
+  def count(self, *vals):
+    """
+    无参数时，等价于 len。
+    可以接受 list 或解包的 list。
+    """
+    if len(vals) == 0:
+      return ExprListCount(target=self, val=None)
+    if len(vals) == 1:
+      return ExprListCount(target=self, val=vals[0])
+    return ExprListCount(target=self, val=list(vals))
   def at(self, idx : int | Expr = -1):
     return ExprListVisitIndex(self, idx)
   def ifelse(self, command_if, command_else):
     return IfElse(cond=self, a=_to_expr(command_if), b = _to_expr(command_else))
+  def map(self, *rules, default=None):
+    cases = []
+    if len(rules) == 1 and isinstance(rules[0], dict):
+      rules = tuple(rules[0].items())
+    for rule in rules:
+      if not isinstance(rule, tuple) or len(rule) != 2:
+        raise TypeError(
+          "map rules must be pairs like (key, value), "
+          "for example: x.map((1, 1), ({7, 8, 9}, 5))"
+        )
+      key, value = rule
+      if key is None:
+        cases.append(MapCase(
+          key=None,
+          value=_to_expr(value),
+          mode="none"
+        ))
+      elif isinstance(key, (set, frozenset)):
+        cases.append(MapCase(
+          key=key,
+          value=_to_expr(value),
+          mode="in"
+        ))
+      else:
+        cases.append(MapCase(
+          key=_to_expr(key),
+          value=_to_expr(value),
+          mode="eq"
+        ))
+    return MapExpr(
+      source=self,
+      cases=cases,
+      default=_to_expr(default) if default is not None else None
+    )
 @dataclass(slots=True, frozen=False, repr=False)
 class Receiver(Expr):
   """静态表达式"""
@@ -761,15 +804,17 @@ class ExprListLen(Expr):
                ._runtime_list(g, is_greater, is_chaizhao, info))
 @dataclass(slots=True, frozen=False, repr=False)
 class ExprListCount(Expr):
-  target : Expr = None
-  val : Any = None
-  def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
+  target: Expr = None
+  val: Any = None
+  def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
     self.target.eval(g, is_greater, is_chaizhao, info)
-    t = Counter(self
-                .target
-                ._runtime_list(g, is_greater, is_chaizhao, info))
+    lst = self.target._runtime_list(g, is_greater, is_chaizhao, info)
+    t = Counter(lst)
     if self.val is None: return len(t)
-    else: return t[self.val]
+    ret = 0
+    for v in _flatten(self.val, g, is_greater, is_chaizhao, info):
+      ret += t[v]
+    return ret
 @dataclass(slots=True, frozen=False, repr=False)
 class ExprListVisitIndex(Expr):
   target : Expr = None
@@ -1211,7 +1256,10 @@ class GameDiceResultHistory(ReversableExpr, DynamicExpr):
     return self._compute(g, is_greater, is_chaizhao, info)
 @dataclass(slots=True, frozen=False, repr=False)
 class FindRange(ReversableExpr, DynamicExpr):
-  """找到指定类型的 range, find_order = 0 从小到大，= 1 逆序，会反转"""
+  """
+  找到指定类型的 range,
+  find_order = 0 从小到大；= 1 逆序，会反转；=2，随机顺序
+  """
   find_range : BattleRange | list[Expr] | Expr | None = None
   find_order : int | list[Expr] = 0
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
@@ -1231,6 +1279,9 @@ class FindRange(ReversableExpr, DynamicExpr):
       o = 1 - o # 反转
     if o == 0: flst = range(0, len(g.state_lst))
     elif o == 1: flst = reversed(range(0, len(g.state_lst)))
+    elif o == 2:
+      flst = list(range(0, len(g.state_lst)))
+      random.shuffle(flst)
     elif isinstance(o, list):
       flst = [i.eval(g, is_greater, is_chaizhao, info) if isinstance(i, Expr) else i for i in o]
     for i in flst:
@@ -1239,11 +1290,17 @@ class FindRange(ReversableExpr, DynamicExpr):
       elif g.state_lst[i] == r:
         return i
   def _str_main(self):
-    s = "从小到大" if self.find_order == 0 else "从大到小"
+    if self.find_order == 0: s = "从小到大"
+    elif self.find_order == 1: s = "从大到小"
+    elif self.find_order == 2: s = "随机顺序"
+    else : s = self.find_order # 不知道是什么，自动解析
     return f"(按 {s} 的顺序在 state_list 找到第一个 {self.find_order})"
 @dataclass(slots=True, frozen=False, repr=False)
 class FindTempRange(ReversableExpr, DynamicExpr):
-  """找到指定类型的 range, find_order = 0 从小到大，= 1 逆序，会反转"""
+  """
+  找到指定类型的 range, 
+  find_order = 0 从小到大；= 1 逆序，会反转；=2 随机顺序
+  """
   find_range : BattleRange | list[Expr] | Expr | None = None
   find_order : int | list[Expr] = 0
   def _compute(self, g, is_greater = None, is_chaizhao = None, info = None):
@@ -1263,6 +1320,9 @@ class FindTempRange(ReversableExpr, DynamicExpr):
       o = 1 - o # 反转
     if o == 0: flst = range(0, len(g.tmp_state_lst))
     elif o == 1: flst = reversed(range(0, len(g.tmp_state_lst)))
+    elif o == 2:
+      flst = list(range(0, len(g.state_lst)))
+      random.shuffle(flst)
     elif isinstance(o, list):
       flst = [i.eval(g, is_greater, is_chaizhao, info) if isinstance(i, Expr) else i for i in o]
     for i in flst:
@@ -1271,7 +1331,10 @@ class FindTempRange(ReversableExpr, DynamicExpr):
       elif g.tmp_state_lst[i] == r:
         return i
   def _str_main(self):
-    s = "从小到大" if self.find_order == 0 else "从大到小"
+    if self.find_order == 0: s = "从小到大"
+    elif self.find_order == 1: s = "从大到小"
+    elif self.find_order == 2: s = "随机顺序"
+    else : s = self.find_order # 不知道是什么，自动解析
     return f"(按 {s} 的顺序在 tmp_state_list 找到第一个 {self.find_order})"
 @dataclass(slots=True, frozen=False, repr=False)
 class GameEternalSkillPlus(ReversableExpr, DynamicExpr):
@@ -1397,6 +1460,12 @@ class CounterAction:
     return (side, mode)
   def apply(self, g, is_greater, is_chaizhao, info):
     raise NotImplementedError
+  def _str_main(self):
+    raise NotImplementedError
+  def __str__(self):
+    return f"将 ({self.name}, {self.side}, {self.turn_type}) 执行 {self._str_main()}"
+  def __repr__(self):
+    return self.__str__()
 @dataclass(slots=True, frozen=False, repr=False)
 class CounterAdd(CounterAction):
   value : int | Expr | None = None
@@ -1409,6 +1478,8 @@ class CounterAdd(CounterAction):
       raise TypeError(f"Counter Add value must be int, got {val}")
     side, mode = self._get_side_and_mode(g, is_greater, is_chaizhao, info)
     g.game_counter[(self.name, side, mode)] += val
+  def _str_main(self):
+    return f"增加 {self.value}"
 @dataclass(slots=True, frozen=False, repr=False)
 class CounterSet(CounterAction):
   value : int | Expr | None = None
@@ -1421,7 +1492,8 @@ class CounterSet(CounterAction):
       raise TypeError(f"Counter Set value must be int, got {val}")
     side, mode = self._get_side_and_mode(g, is_greater, is_chaizhao, info)
     g.game_counter[(self.name, side, mode)] = val
-
+  def _str_main(self):
+    return f"设置为 {self.value}"
 @dataclass(slots=True, frozen=False, repr=False)
 class Unary(Expr):
   x: Expr = None
@@ -1686,6 +1758,52 @@ class IfElse(Expr):
       return x
     def __str__(self):
       return f"({self.cond} ? {self.a} : {self.b})"
+@dataclass(slots=True, frozen=False, repr=False)
+class MapCase:
+  key: Any = None
+  value: Expr = None
+  mode: str = "eq"  # "eq", "in", "none"
+  def match(self, source_expr, g, is_greater=None, is_chaizhao=None, info=None):
+    if source_expr is None:
+      return self.mode == "none" and self.key is None
+    if self.mode == "none":
+      return source_expr.eval(g, is_greater, is_chaizhao, info) is None
+    if self.mode == "isin":
+      return source_expr.isin(self.key).eval(
+        g, is_greater, is_chaizhao, info
+      ) is True
+    # mode == "eq"
+    return source_expr.eq(self.key).eval(
+      g, is_greater, is_chaizhao, info
+    ) is True
+  def eval_value(self, g, is_greater=None, is_chaizhao=None, info=None):
+    return self.value.eval(g, is_greater, is_chaizhao, info)
+@dataclass(slots=True, frozen=False, repr=False)
+class MapExpr(DynamicExpr):
+  source: Expr = None
+  cases: list[MapCase] = field(default_factory=list)
+  default: Expr | None = None
+  def is_algebraic(self):
+    return False
+  def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
+    for case in self.cases:
+      if case.match(self.source, g, is_greater, is_chaizhao, info):
+        return case.eval_value(g, is_greater, is_chaizhao, info)
+    if self.default is not None:
+      return self.default.eval(g, is_greater, is_chaizhao, info)
+    return None
+  def __str__(self):
+    parts = []
+    for case in self.cases:
+      if case.mode == "in":
+        parts.append(f"若 {self.source} 在 {case.key} 中，则 {case.value}")
+      else:
+        parts.append(f"若 {self.source} == {case.key}，则 {case.value}")
+    if self.default is not None:
+      parts.append(f"否则 {self.default}")
+    else:
+      parts.append("否则 None")
+    return "；".join(parts)
 
 @dataclass(slots=True, frozen=False, repr=False)
 class NotChaizhao(Expr):
@@ -1772,8 +1890,24 @@ class r_skill(base_skill):
   def _str_main(self):
     raise NotImplementedError
   def __str__(self):
-    if self.valid_when is None: return self._str_main()
-    else: return f"当 {self.valid_when} 时，{self._str_main()}"
+    if self.valid_when is None: main_part = self._str_main()
+    else: main_part = f"当 {self.valid_when} 时，{self._str_main()}"
+    def decode_list(lst : list | None) -> str:
+      if lst is None or len(lst) == 0: return None
+      else:
+        s = ""
+        for x in lst: s += f"{x}, "
+        return s.removesuffix(", ")
+    p = ""
+    s = decode_list(self.on_init)
+    if s is not None: p = f"[初始时, {s}]; "
+    s = decode_list(self.before_check)
+    if s is not None: p = p + f"[判定开始前, {s}]; "
+    s = decode_list(self.on_trigger)
+    if s is not None: p = p + f"[触发时, {s}]; "
+    s = decode_list(self.on_work_after)
+    if s is not None: p = p + f"[结算完成后, {s}]; "
+    return p + main_part
   def work(self, g:game, is_greater:bool, is_chaizhao:bool):
     raise KeyError(f"Subclass must imply work()")
   def __call__(self, g, is_greater, is_chaizhao):
@@ -2151,39 +2285,13 @@ def simulate_game_auto_batch(
   param : Any | None = None,
   confidence_level : float = 0.99,
   deviation : float = 0.005,
-  worker_num : int = 4, display : bool = True
+  worker_num : int = 4,
+  display : bool = True,
+  simulate_num : int = 0
 ):
-  begin_time = time.time()
-  alpha = 1 - confidence_level
-  N = math.ceil(math.log(2 / alpha) / (2 * deviation * deviation))
-  if type(generator) == game:
-    g = generator
+  if simulate_num == 0:
+    alpha = 1 - confidence_level
+    N = math.ceil(math.log(2 / alpha) / (2 * deviation * deviation))
   else:
-    if param is None: g = generator()
-    else: g = generator(param)
-  if worker_num is None or worker_num <= 0 or worker_num > cpu_count():
-    worker_num = 1
-  num = worker_num - N % worker_num
-  num += N
-  chunk = num // worker_num
-  tasks = [(g, chunk) for _ in range(worker_num)]
-  if display:
-    print(f"simulate_batch: N={N}, workers={worker_num}")
-  with Pool(worker_num) as pool:
-    results = pool.map(_simulate_worker, tasks)
-  win_rate, win_turn = [i[0][0] for i in results], [i[0][1] for i in results]
-  loss_rate, loss_turn = [i[1][0] for i in results], [i[1][1] for i in results]
-  draw_rate = [i[2] for i in results]
-  win_rate = sum(win_rate) / len(results)
-  win_turn = sum(win_turn) / len(results)
-  loss_rate = sum(loss_rate) / len(results)
-  loss_turn = sum(loss_turn) / len(results)
-  draw_rate = sum(draw_rate) / len(results)
-  end_time = time.time()
-  if display:
-    print(f"用时: {end_time - begin_time} second")
-    print(f"骰子: {g.dice}")
-    print(f"Greater player: {g.greater_player}\nwin rate: {win_rate}, average win turn: {win_turn}")
-    print(f"Less player: {g.less_player}\nwin rate: {loss_rate}, average win turn: {loss_turn}")
-    print(f"draw rate: {draw_rate}")
-  return ((win_rate, win_turn), (loss_rate, loss_turn), draw_rate)
+    N = simulate_num
+  simulate_batch_one_game(generator, param, N, worker_num, display)

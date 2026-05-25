@@ -41,12 +41,35 @@ from skill import rcall_armor
 if __name__ == "__main__":
   p1 = player([
               rcall_plus(
-                valid_when=(LastDiceResult() % 2).eq(1),
-                num=4 - (LastDiceResult() // 2)
-              ),
+                on_init=[
+                  CounterSet("阴", value=0),
+                  CounterSet("阳", value=1)
+                ],
+                before_check=[
+                  CounterAdd(
+                    "阴",
+                    value=
+                    (Tail(1) % 2).eq(0).ifelse(1, 0)
+                  ),
+                  CounterAdd(
+                    "阳",
+                    value=
+                    (Tail(0) % 2).eq(1).ifelse(1, 0)
+                  )
+                ],
+                valid_when=(
+                  (CounterValue("阴") % 2).eq(CounterValue("阳") % 2)
+                ),
+                num=LastDiceResult().eq(10).ifelse(
+                  0,
+                  (CounterValue("阴") % 2).eq(1).ifelse(
+                    9, 8
+                  ) - LastDiceResult()
+                ),
+              )
             ])
   p2 = player([
-              rcall_plus(num=1),
+              rcall_plus(num=2),
             ])
   g = game(
     p1, p2,
@@ -56,6 +79,6 @@ if __name__ == "__main__":
   simulate_game_auto_batch(
     generator=g,
     confidence_level=0.99,
-    deviation=0.003,
+    deviation=0.0025,
     worker_num=6
   )
