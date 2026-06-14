@@ -276,8 +276,35 @@ class game:
     self.skill_type_now = ST_ADD # for a pause
     self.dice_this_turn = None # 当前回合骰子的值
     self.game_counter = Counter()
-    self.eternal_skill_plus = Counter()
+    # 永久加值 pool
+    self.eternal_skill_plus = {}
+    self._eternal_effect_id = 0
+    self.last_eternal_skill_plus = 0 # 维护一个 last eternal skill plus，避免外部访问时重复 eval
     self.init_skills()
+  def add_eternal_effect(self, skill_name, expr, is_greater, info=None):
+    side = "G" if is_greater else "L"
+    key = f"{skill_name}:{side}:{self._eternal_effect_id}"
+    self._eternal_effect_id += 1
+    self.eternal_skill_plus[key] = {
+      "expr": expr,
+      "is_greater": is_greater,
+      "info": info,
+    }
+  def eval_eternal_skill_plus(self, is_chaizhao=False):
+    total = 0
+    for key, effect in list(self.eternal_skill_plus.items()):
+      expr = effect["expr"]
+      is_greater = effect["is_greater"]
+      info = effect["info"]
+      if isinstance(expr, Expr):
+        val = expr.eval(self, is_greater, is_chaizhao, info)
+      else:
+        val = expr
+      if val is None: continue
+      if not isinstance(val, int):
+        raise TypeError(f"eternal effect {key} returns non-int value: {val}")
+      total += val if is_greater else -val
+    return total
   def init_skills(self):
     self.skill_type_now = None
     for skill in self.greater_player.skills:
@@ -369,7 +396,8 @@ class game:
     if not is_chaizhao:
       self.last_value += self.situation_add
       # 局面加值
-      self.last_value += sum(self.eternal_skill_plus.values())
+      self.last_eternal_skill_plus = self.eval_eternal_skill_plus(False)
+      self.last_value += self.last_eternal_skill_plus
       # 技能的永久加值
     else:
       self.last_value += self.get_chaizhao_add()
@@ -1134,6 +1162,7 @@ class LastRange(ReversableExpr, DynamicExpr):
     return f"结果区间"
 @dataclass(slots=True, frozen=False, repr=False)
 class RangeAt(ReversableExpr, DynamicExpr):
+  """得到 num 对应的区间，取 0-9，超出直接 LOSS/WIN"""
   num : int | Expr = None
   def _get_range(self, g : game, is_greater, is_chaizhao, info):
     num = self.num
@@ -1340,7 +1369,7 @@ class FindTempRange(ReversableExpr, DynamicExpr):
 class GameEternalSkillPlus(ReversableExpr, DynamicExpr):
   """不需要区别正负，会自动取反。"""
   def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
-    val = sum(g.eternal_skill_plus.values())
+    val = g.last_eternal_skill_plus
     if self.is_reverse:
       return val if is_greater else -val
     return val
@@ -1348,7 +1377,10 @@ class GameEternalSkillPlus(ReversableExpr, DynamicExpr):
     return "永久技能加值"
 @dataclass(slots=True, frozen=False, repr=False)
 class EternalSkillPlusAt(ReversableExpr, DynamicExpr):
-  """某个技能带来的永久加值"""
+  """
+  暂时废弃，请不要使用
+  某个技能带来的永久加值
+  """
   skill_name: str = None
   def _compute(self, g, is_greater=None, is_chaizhao=None, info=None):
     if self.skill_name is None: return 0
@@ -2125,27 +2157,25 @@ class rcall_temp_range_change(rbase_range_change):
 @dataclass(repr=False, kw_only=True)
 class rcall_eternal_plus(r_skill):
   """
-  如果 skill_name 是 None，就会加到局势上(g.situation_add)，否则在 g 上有自己的 pool
+  条件成立时，向 game 的 eternal effect pool 插入一个 Expr。
+  pool 的 eval / 求和 / 删除由 game 统一负责。
   """
   num: int | Expr = None
   def __post_init__(self):
     super().__post_init__()
     self.type = ST_ADD
     self._exprify_fields("num")
-  def work(self, g, is_greater, is_chaizhao):
-    num = self.num
-    if isinstance(num, Expr):
-      num = num.eval(g, is_greater, is_chaizhao, self.info)
-    if num is None: return
-    if not isinstance(num, int):
-      raise TypeError(f"Num of {type(self).__name__} is not int but {num}")
-    delta = num if is_greater else -num
     if self.skill_name is None:
-      g.situation_add += delta
-    else:
-      g.eternal_skill_plus[self.skill_name] += delta
+      raise ValueError("rcall_eternal_plus requires skill_name")
+  def work(self, g: game, is_greater: bool, is_chaizhao: bool):
+    g.add_eternal_effect(
+      skill_name=self.skill_name,
+      expr=deepcopy(self.num),
+      is_greater=is_greater,
+      info=self.info,
+    )
   def _str_main(self):
-    return f"永久获得 {self.num:+d}" if isinstance(self.num, int) else f"永久获得 {self.num}"
+    return f"生成永久加值池效果 {self.num}"
 @dataclass(repr=False, kw_only=True)
 class rcall_armor(rcall_last_range_change):
   """
@@ -2203,11 +2233,50 @@ class rcall_armor(rcall_last_range_change):
   def _str_main(self):
     return f"(护甲[{self.armor_name}]，初始值 {self.value}，效果 [变为 {self.armor_effect}])"
 
-def simulate(g: game, N: int = 100000, display:bool = True) -> float:
-  start_time = time.time()
-  win, win_t = 0, 0
-  loss, loss_t = 0, 0
-  draw = 0
+def _empty_stats():
+  return {
+    "win": 0,
+    "win_t": 0,
+    "win_min_t": None,
+    "win_max_t": None,
+    "loss": 0,
+    "loss_t": 0,
+    "loss_min_t": None,
+    "loss_max_t": None,
+    "draw": 0,
+    "total": 0,
+  }
+def _update_min_max(old_min, old_max, x):
+  if old_min is None or x < old_min:
+    old_min = x
+  if old_max is None or x > old_max:
+    old_max = x
+  return old_min, old_max
+def _merge_stats(a, b):
+  a["win"] += b["win"]
+  a["win_t"] += b["win_t"]
+  a["loss"] += b["loss"]
+  a["loss_t"] += b["loss_t"]
+  a["draw"] += b["draw"]
+  a["total"] += b["total"]
+  if b["win_min_t"] is not None:
+    a["win_min_t"], a["win_max_t"] = _update_min_max(
+      a["win_min_t"], a["win_max_t"], b["win_min_t"]
+    )
+    a["win_min_t"], a["win_max_t"] = _update_min_max(
+      a["win_min_t"], a["win_max_t"], b["win_max_t"]
+    )
+  if b["loss_min_t"] is not None:
+    a["loss_min_t"], a["loss_max_t"] = _update_min_max(
+      a["loss_min_t"], a["loss_max_t"], b["loss_min_t"]
+    )
+    a["loss_min_t"], a["loss_max_t"] = _update_min_max(
+      a["loss_min_t"], a["loss_max_t"], b["loss_max_t"]
+    )
+  return a
+def _simulate_stats(g: game, N: int = 100000, display: bool = False):
+  stats = _empty_stats()
+  stats["total"] = N
   if display:
     print(f"simulate {N} times")
     print(f"骰子: {g.dice}")
@@ -2217,68 +2286,123 @@ def simulate(g: game, N: int = 100000, display:bool = True) -> float:
     while t.turn < 100:
       state, turn = t.simulate_one_turn()
       if state == WIN:
-        win += 1
-        win_t += turn
+        stats["win"] += 1
+        stats["win_t"] += turn
+        stats["win_min_t"], stats["win_max_t"] = _update_min_max(
+          stats["win_min_t"], stats["win_max_t"], turn
+        )
         break
       elif state == LOSS:
-        loss += 1
-        loss_t += turn
+        stats["loss"] += 1
+        stats["loss_t"] += turn
+        stats["loss_min_t"], stats["loss_max_t"] = _update_min_max(
+          stats["loss_min_t"], stats["loss_max_t"], turn
+        )
         break
     if state != WIN and state != LOSS:
-      draw += 1
+      stats["draw"] += 1
     if N < 10 and display:
       print(t)
-  win_rate, win_turn = win / N, win_t / win if win != 0 else 0
-  loss_rate, loss_turn = loss / N, loss_t / loss if loss != 0 else 0
-  draw_rate = draw / N
+  return stats
+def _stats_to_result(stats):
+  N = stats["total"]
+  win = stats["win"]
+  loss = stats["loss"]
+  draw = stats["draw"]
+  win_rate = win / N if N else 0
+  loss_rate = loss / N if N else 0
+  draw_rate = draw / N if N else 0
+  win_turn = stats["win_t"] / win if win != 0 else 0
+  loss_turn = stats["loss_t"] / loss if loss != 0 else 0
+  return (
+    (win_rate, win_turn, stats["win_min_t"], stats["win_max_t"]),
+    (loss_rate, loss_turn, stats["loss_min_t"], stats["loss_max_t"]),
+    draw_rate
+  )
+def simulate(g: game, N: int = 100000, display:bool = True):
+  start_time = time.time()
+  # if display:
+  #   print(f"simulate {N} times")
+  #   print(f"骰子: {g.dice}")
+  stats = _simulate_stats(g, N, display=display)
+  result = _stats_to_result(stats)
+  (win_rate, win_turn, win_min_t, win_max_t), (loss_rate, loss_turn, loss_min_t, loss_max_t), draw_rate = result
   end_time = time.time()
   if display:
     print(f"耗时: {end_time - start_time} second")
-    print(f"Greater player: {g.greater_player}\nwin rate: {win_rate}, average win turn: {win_turn}")
-    print(f"Less player: {g.less_player}\nwin rate: {loss_rate}, average win turn: {loss_turn}")
+    print(
+      f"Greater player: {g.greater_player}\n"
+      f"win rate: {win_rate}, "
+      f"average win turn: {win_turn}\n"
+      f"min win turn: {win_min_t}, "
+      f"max win turn: {win_max_t}"
+    )
+    print(
+      f"Less player: {g.less_player}\n"
+      f"win rate: {loss_rate}, "
+      f"average win turn: {loss_turn}\n"
+      f"min win turn: {loss_min_t}, "
+      f"max win turn: {loss_max_t}"
+    )
     print(f"draw rate: {draw_rate}")
-  return ((win_rate, win_turn), (loss_rate, loss_turn), draw_rate)
+  return result
 def _simulate_worker(arg):
   inner_g, n = arg
-  return simulate(deepcopy(inner_g), n, display=False)
+  return _simulate_stats(deepcopy(inner_g), n, display=False)
 def simulate_batch_one_game(
-  generator : Callable[[Any], game] | game,
-  param : Any | None = None,
-  N : int = 100_000,
-  worker_num : int = 4, display : bool = True
+  generator: Callable[[Any], game] | game,
+  param: Any | None = None,
+  N: int = 100_000,
+  worker_num: int = 4,
+  display: bool = True
 ):
   begin_time = time.time()
   if type(generator) == game:
     g = generator
   else:
-    if param is None: g = generator()
-    else: g = generator(param)
+    if param is None:
+      g = generator()
+    else:
+      g = generator(param)
   if worker_num is None or worker_num <= 0 or worker_num > cpu_count():
     worker_num = 1
-  num = worker_num - N % worker_num
-  num += N
-  chunk = num // worker_num
-  tasks = [(g, chunk) for _ in range(worker_num)]
+  worker_num = min(worker_num, N)
+  base = N // worker_num
+  rem = N % worker_num
+  chunks = [
+    base + (1 if i < rem else 0)
+    for i in range(worker_num)
+  ]
+  tasks = [(g, chunk) for chunk in chunks if chunk > 0]
   if display:
-    print(f"simulate_batch: N={N}, workers={worker_num}")
-  with Pool(worker_num) as pool:
+    print(f"simulate_batch: N={N}, workers={len(tasks)}")
+  total_stats = _empty_stats()
+  with Pool(len(tasks)) as pool:
     results = pool.map(_simulate_worker, tasks)
-  win_rate, win_turn = [i[0][0] for i in results], [i[0][1] for i in results]
-  loss_rate, loss_turn = [i[1][0] for i in results], [i[1][1] for i in results]
-  draw_rate = [i[2] for i in results]
-  win_rate = sum(win_rate) / len(results)
-  win_turn = sum(win_turn) / len(results)
-  loss_rate = sum(loss_rate) / len(results)
-  loss_turn = sum(loss_turn) / len(results)
-  draw_rate = sum(draw_rate) / len(results)
+  for s in results:
+    _merge_stats(total_stats, s)
+  result = _stats_to_result(total_stats)
+  (win_rate, win_turn, win_min_t, win_max_t), (loss_rate, loss_turn, loss_min_t, loss_max_t), draw_rate = result
   end_time = time.time()
   if display:
     print(f"用时: {end_time - begin_time} second")
     print(f"骰子: {g.dice}")
-    print(f"Greater player: {g.greater_player}\nwin rate: {win_rate}, average win turn: {win_turn}")
-    print(f"Less player: {g.less_player}\nwin rate: {loss_rate}, average win turn: {loss_turn}")
+    print(
+      f"Greater player: {g.greater_player}\n"
+      f"win rate: {win_rate}, "
+      f"average win turn: {win_turn}\n"
+      f"min win turn: {win_min_t}, "
+      f"max win turn: {win_max_t}"
+    )
+    print(
+      f"Less player: {g.less_player}\n"
+      f"win rate: {loss_rate}, "
+      f"average win turn: {loss_turn}\n"
+      f"min win turn: {loss_min_t}, "
+      f"max win turn: {loss_max_t}"
+    )
     print(f"draw rate: {draw_rate}")
-  return ((win_rate, win_turn), (loss_rate, loss_turn), draw_rate)
+  return result
 
 def simulate_game_auto_batch(
   generator : Callable[[Any], game] | game,

@@ -38,38 +38,40 @@ from skill import rcall_num_view_as
 from skill import rcall_armor
 # 护甲机制
 
+from old_skill import skill_wgu
+
 if __name__ == "__main__":
   p1 = player([
-              rcall_plus(
-                on_init=[
-                  CounterSet("阴", value=0),
-                  CounterSet("阳", value=1)
-                ],
-                before_check=[
-                  CounterAdd(
-                    "阴",
-                    value=
-                    (Tail(1) % 2).eq(0).ifelse(1, 0)
-                  ),
-                  CounterAdd(
-                    "阳",
-                    value=
-                    (Tail(0) % 2).eq(1).ifelse(1, 0)
-                  )
-                ],
-                valid_when=(
-                  (CounterValue("阴") % 2).eq(CounterValue("阳") % 2)
-                ),
-                num=LastDiceResult().eq(10).ifelse(
-                  0,
-                  (CounterValue("阴") % 2).eq(1).ifelse(
-                    9, 8
-                  ) - LastDiceResult()
-                ),
+              rcall_range_change(
+                valid_when=LastRange().eq(BEGIN),
+                range_id=FindRange(LOSS),
+                arg=1
+              ),
+              rcall_range_change(
+                valid_when=LastRange().eq(BEGIN),
+                range_id=FindRange(DISADVANTAGE),
+                arg=1
+              ),
+              rcall_range_change(
+                valid_when=LastRange().eq(BEGIN),
+                range_id=FindRange(DISADVANTAGE),
+                arg=1
+              ),
+              rcall_range_change(
+                valid_when=LastRange().eq(BEGIN),
+                range_id=FindRange(DISADVANTAGE),
+                arg=1
+              ),
+              rcall_range_change(
+                valid_when=LastRange().eq(BEGIN),
+                range_id=FindRange(ADVANTAGE),
+                arg=-1
               )
             ])
   p2 = player([
-              rcall_plus(num=2),
+              rcall_plus(
+                num=1
+              )
             ])
   g = game(
     p1, p2,
